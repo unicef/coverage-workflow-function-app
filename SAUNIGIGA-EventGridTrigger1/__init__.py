@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import traceback
+from typing import Any
 
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient
@@ -19,6 +20,7 @@ import requests
 def main(event: func.EventGridEvent):
 
     event_data = event.get_json()
+    logging.info(event_data)
     blob_url = event_data['blobUrl']
     blob_file_path = re.search(r"(?<=(blob.core.windows.net\/))(.*)", blob_url)[0]
 
@@ -63,7 +65,9 @@ def main(event: func.EventGridEvent):
         else:
         
             try:
-                coverage_df = process_coverage_data(facebook_df=partners_data_dict['facebook'], itu_df=partners_data_dict['itu'])
+                facebook_df = partners_data_dict['facebook']['data']
+                itu_df = partners_data_dict['itu']['data']
+                coverage_df = process_coverage_data(facebook_df=facebook_df, itu_df=itu_df)
             except Exception as e:
                 error_text = f"Error while processing coverage data:\n{traceback.format_exc()}"
                 send_slack_message(message=error_text)
@@ -77,10 +81,18 @@ def main(event: func.EventGridEvent):
                 raise
                 
             try:
-                store_files(country_name=country_name, blob_service_client=blob_service_client, facebook_df=partners_data_dict['facebook'],
-                            itu_df=partners_data_dict['itu'], coverage_df=coverage_df, master_df=master_with_coverage)
+                store_files(country_name=country_name, blob_service_client=blob_service_client, facebook_df=facebook_df,
+                            itu_df=itu_df, coverage_df=coverage_df, master_df=master_with_coverage)
             except Exception as e:
-                error_text = f"Error while processing saving files:\n{traceback.format_exc()}"
+                error_text = f"Error while saving files:\n{traceback.format_exc()}"
+                send_slack_message(message=error_text)
+                raise
+
+
+            try:
+                delete_processed_partner_data(blob_service_client=blob_service_client, partners_data_dict=partners_data_dict)
+            except Exception as e:
+                error_text = f"Error while deleting files:\n{traceback.format_exc()}"
                 send_slack_message(message=error_text)
                 raise
 
@@ -96,29 +108,35 @@ def main(event: func.EventGridEvent):
 
 def get_partner_data(blob_service_client: BlobServiceClient, country_name: str, 
                      partners_list: list[str]) -> tuple[dict, pd.DataFrame]:
+    
     partners_data_dict = {}
 
     for partner in partners_list:
-        partner_df = get_blob_storage_data(blob_service_client, partner, country_name)
+        partner_df, partner_file_path = get_blob_storage_data(blob_service_client, partner, country_name)
 
         if type(partner_df) == type(None):
             return None, None
         else:
-            partners_data_dict[partner] = partner_df
+            partners_data_dict[partner] = {'data': partner_df, 'file_path': partner_file_path}
 
-    master_df = get_blob_storage_data(blob_service_client=blob_service_client, container_name='giga', country_name=country_name)
+    container_name = os.environ['DATA_CONTAINER_NAME']
+    master_df, _ = get_blob_storage_data(blob_service_client=blob_service_client, container_name=container_name, country_name=country_name)
 
     return partners_data_dict, master_df
 
 
 def store_files(country_name, blob_service_client, facebook_df, itu_df, coverage_df, master_df):
+        container_name = os.environ['DATA_CONTAINER_NAME']
+        raw_coverage_folder = os.environ['RAW_COVERAGE_FOLDER']
+        processed_coverage_folder = os.environ['PROCESSED_COVERAGE_FOLDER']
+        master_file_folder = os.environ['MASTER_FILE_FOLDER']
+
         datetime_string = datetime.today().strftime('%Y%m%d_%H%M%S')
-        container_name = 'giga'
         iso3_code = coco.convert(country_name, to='iso3')
-        facebook_file_path = f'personal/brian/tests/bronze/coverage_data/facebook/{iso3_code}_coverage_data_{datetime_string}.csv'
-        itu_file_path = f'personal/brian/tests/bronze/coverage_data/itu/{iso3_code}_coverage_data_{datetime_string}.csv'
-        coverage_file_path = f'personal/brian/tests/silver/coverage_data/{iso3_code}_school_geolocation_coverage_master.csv'
-        master_file_path = f'personal/brian/tests/gold/school_data/{iso3_code}_school_geolocation_coverage_master.csv'
+        facebook_file_path = f'{raw_coverage_folder}/facebook/{iso3_code}_coverage_data_{datetime_string}.csv'
+        itu_file_path = f'{raw_coverage_folder}/itu/{iso3_code}_coverage_data_{datetime_string}.csv'
+        coverage_file_path = f'{processed_coverage_folder}/{iso3_code}_school_geolocation_coverage_master.csv'
+        master_file_path = f'{master_file_folder}/{iso3_code}_school_geolocation_coverage_master.csv'
 
         # upload different files to respective locations
         upload_to_blob_client(blob_service_client=blob_service_client, container=container_name, blob_file_path=facebook_file_path,
@@ -130,6 +148,12 @@ def store_files(country_name, blob_service_client, facebook_df, itu_df, coverage
         upload_to_blob_client(blob_service_client=blob_service_client, container=container_name, blob_file_path=master_file_path,
                               df=master_df, overwrite=True)
 
+
+def delete_processed_partner_data(blob_service_client: BlobServiceClient, partners_data_dict: dict[dict[str, Any]]) -> None:
+    for partner_name in partners_data_dict.keys():
+        container_name = f"coverage-data-{partner_name}"
+        file_path = partners_data_dict[partner_name]['file_path']
+        delete_blob_client(blob_service_client=blob_service_client, container=container_name, blob_file_path=file_path)
 
 
 def get_blob_storage_data(blob_service_client: BlobServiceClient, container_name: str, country_name: str) -> pd.DataFrame:
@@ -154,13 +178,11 @@ def get_blob_storage_data(blob_service_client: BlobServiceClient, container_name
         blob_name = blobs_with_name[0]
     except IndexError:
         logging.info(f'File from {container_name} for {country_name} not yet received')
-        return None
+        return None, None
     
     partner_data = download_from_blob_client(blob_service_client=blob_service_client, container=container_name, blob_file_path=blob_name)
     partner_df = pd.read_csv(io.BytesIO(partner_data))
-    return partner_df
-    
-
+    return partner_df, blob_name
     
 
 def process_coverage_data(facebook_df: pd.DataFrame, itu_df: pd.DataFrame):
@@ -295,6 +317,11 @@ def upload_to_blob_client(blob_service_client: BlobServiceClient, container: str
     blob_client = blob_service_client.get_blob_client(container=container, blob=blob_file_path, snapshot=None)
     upload_response = blob_client.upload_blob(binary_data, overwrite=overwrite)
     return upload_response
+
+def delete_blob_client(blob_service_client: BlobServiceClient, container: str, blob_file_path: str):
+    blob_client = blob_service_client.get_blob_client(container=container, blob=blob_file_path, snapshot=None)
+    delete_response = blob_client.delete_blob()
+    return delete_response
 
 
 def get_list_of_blobs(blob_service_client: BlobServiceClient, container: str, name_starts_with: str):
