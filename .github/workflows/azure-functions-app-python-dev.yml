@@ -56,7 +56,7 @@ jobs:
   
     - name: Test with pytest
       run: |
-        pytest SAUNIGIGA-EventGridTrigger1/tests.py
+        python -m pytest SAUNIGIGA-EventGridTrigger1/tests.py
 
     - name: 'Run Azure Functions Action'
       uses: Azure/functions-action@v1
