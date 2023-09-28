@@ -36,14 +36,7 @@ def main(event: func.EventGridEvent):
     if folder_name == "unprocessed":
         slack_text = f"File {file_name} for {country_name} has been sent to {partner_name.title()}"
 
-        # if os.environ.get('GIGA_EMAILS'):
-
-        #     partner_emails = os.environ[f'{partner_name.upper()}_EMAIL_LIST']
-        #     giga_emails = os.environ['GIGA_EMAILS']
-        #     email_list = partner_emails + giga_emails
-        #     email_message = "Hello, a new file has been updated to the Giga storage folder {country_name}"
-        #     subject = f"Coverage data for {country_name}"
-            # send_email(recipient_list=email_list, subject=subject, body=message, )
+        # TODO: Add functionality to send Email to partner
 
     elif folder_name == "processed":
         slack_text = f"Coverage file {file_name} for {country_name} has been received from {partner_name.title()}"
