@@ -240,7 +240,12 @@ def merge_coverage_and_master(master_df: pd.DataFrame, coverage_df: pd.DataFrame
     :param coverage_df: The dataframe of the processed coverage data
     :returns: pd.DataFrame
     """
-    master_df = master_df.merge(coverage_df, how='left', on='giga_id_school')
+    master_df = master_df.merge(coverage_df, how='left', on='giga_id_school',
+                                suffixes=('_current_value', '_cov_update'))
+    updated_columns = [col.replace('_cov_update', '') for col in master_df.columns if col.endswith('_cov_update')]
+
+    for column in updated_columns:
+        master_df[column] = master_df[f"{column}_cov_update"].combine_first(master_df[f"{column}_current_value"])
 
     main_cols = ['giga_id_school', 'school_id', 'name', 'lat', 'lon', 'education_level',
                  'education_level_regional', 'school_type',
