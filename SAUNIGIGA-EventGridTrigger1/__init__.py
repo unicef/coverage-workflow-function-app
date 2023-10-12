@@ -25,7 +25,7 @@ def main(event: func.EventGridEvent):
     blob_file_path = re.search(r"(?<=(blob.core.windows.net\/))(.*)", blob_url)[0]
 
     if not blob_file_path or not str(blob_file_path).endswith('.csv'):
-        logging.info(f'Uploaded file {blob_file_path} is not a valid file')
+        logging.error(f'Uploaded file {blob_file_path} is not a valid file')
         return
 
     container_name, folder_name, file_name = blob_file_path.split('/')
@@ -113,7 +113,8 @@ def get_partner_data(blob_service_client: BlobServiceClient, country_name: str,
             partners_data_dict[partner] = {'data': partner_df, 'file_path': partner_file_path}
 
     container_name = os.environ['DATA_CONTAINER_NAME']
-    master_df, _ = get_blob_storage_data(blob_service_client=blob_service_client, container_name=container_name, country_name=country_name)
+    master_df, _ = get_blob_storage_data(blob_service_client=blob_service_client, container_name=container_name,
+                                         country_name=country_name)
 
     return partners_data_dict, master_df
 
@@ -164,14 +165,32 @@ def get_blob_storage_data(blob_service_client: BlobServiceClient, container_name
     else:
         Exception('Invalid container name provided. Must be one of; facebook, itu and giga')
 
-    blobs_with_name = get_list_of_blobs(blob_service_client = blob_service_client, container=container_name, name_starts_with=name_starts_with)
-    blobs_with_name = [blob['name'] for blob in blobs_with_name]
+    def get_blobs_with_name(blob_service_client, container_name, name_starts_with):
+        blobs_with_name = get_list_of_blobs(blob_service_client=blob_service_client, container=container_name,
+                                            name_starts_with=name_starts_with)
+        blobs_with_name = [blob['name'] for blob in blobs_with_name]
+        return blobs_with_name
 
     try:
+        blobs_with_name = get_blobs_with_name(blob_service_client=blob_service_client, container=container_name,
+                                              name_starts_with=name_starts_with)
         blob_name = blobs_with_name[0]
     except IndexError:
-        logging.info(f'File from {container_name} for {country_name} not yet received')
-        return None, None
+        missing_file_error = True
+        # for the master file, first we check the gold folder and then the silver folder
+        if container_name == 'giga':
+            missing_file_error = False
+            name_starts_with = name_starts_with.replace('gold', 'silver')
+            try:
+                blobs_with_name = get_blobs_with_name(blob_service_client=blob_service_client, container=container_name,
+                                                      name_starts_with=name_starts_with)
+                blob_name = blobs_with_name[0]
+            except IndexError:
+                missing_file_error = True
+
+        if missing_file_error:
+            logging.info(f'File from {container_name} for {country_name} not yet received')
+            return None, None
     
     partner_data = download_from_blob_client(blob_service_client=blob_service_client, container=container_name, blob_file_path=blob_name)
     partner_df = pd.read_csv(io.BytesIO(partner_data))
@@ -199,13 +218,11 @@ def process_coverage_data(facebook_df: pd.DataFrame, itu_df: pd.DataFrame):
                         'microwave_node_distance', 'nearest_school_distance', 'schools_within_1km', 'schools_within_2km',
                         'schools_within_3km', 'schools_within_10km', 'nearest_LTE_id', 'nearest_LTE_distance',
                         'nearest_UMTS_id', 'nearest_UMTS_distance', 'nearest_GSM_id', 'nearest_GSM_distance',
-                        '2G_coverage', '3G_coverage', '4G_coverage', 'pop_within_1km', 'pop_within_2km',
-                        'pop_within_3km', 'pop_within_10km']
+                        'pop_within_1km', 'pop_within_2km', 'pop_within_3km', 'pop_within_10km']
     
     facebook_df = facebook_df.loc[facebook_df['giga_id_school'].notna(), fb_cols_to_keep]
     itu_df = itu_df.loc[itu_df['giga_id_school'].notna(), [col for col in itu_cols_to_keep if col in itu_df.columns]]
-    
-    
+
     # combine the coverage data
     coverage_df = facebook_df.merge(itu_df, on='giga_id_school', suffixes=('', '_itu'), how='outer')
 
@@ -271,7 +288,8 @@ def merge_coverage_and_master(master_df: pd.DataFrame, coverage_df: pd.DataFrame
 
 def send_slack_message(message: str, webhook: str = None) -> requests.Response:
     """Send a Slack message to a channel via a webhook.
-    :param payload: Dictionary containing Slack message, i.e. {"text": "This is a test"}
+    :param message: Dictionary containing Slack message, i.e. {"text": "This is a test"}
+    :param webhook: The Slack webhook to which the message will be sent
     :returns: HTTP response code, i.e. <Response [503]>
     """
 
@@ -315,6 +333,7 @@ def upload_to_blob_client(blob_service_client: BlobServiceClient, container: str
     blob_client = blob_service_client.get_blob_client(container=container, blob=blob_file_path, snapshot=None)
     upload_response = blob_client.upload_blob(binary_data, overwrite=overwrite)
     return upload_response
+
 
 def delete_blob_client(blob_service_client: BlobServiceClient, container: str, blob_file_path: str):
     blob_client = blob_service_client.get_blob_client(container=container, blob=blob_file_path, snapshot=None)
